@@ -24,11 +24,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/code-us/imageproxy"
 	"github.com/gregjones/httpcache"
 	"github.com/gregjones/httpcache/diskcache"
 	"github.com/peterbourgon/diskv"
 	"sourcegraph.com/sourcegraph/s3cache"
-	"willnorris.com/go/imageproxy"
 )
 
 // goxc values
