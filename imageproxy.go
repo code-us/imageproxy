@@ -14,7 +14,7 @@
 
 // Package imageproxy provides an image proxy server.  For typical use of
 // creating and using a Proxy, see cmd/imageproxy/main.go.
-package imageproxy // import "willnorris.com/go/imageproxy"
+package imageproxy
 
 import (
 	"bufio"
@@ -23,16 +23,19 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	tphttp "github.com/code-us/imageproxy/third_party/http"
 	"github.com/golang/glog"
 	"github.com/gregjones/httpcache"
-	tphttp "willnorris.com/go/imageproxy/third_party/http"
 )
 
 // Proxy serves image requests.
@@ -70,6 +73,7 @@ type Proxy struct {
 // used to fetch remote URLs.  If nil is provided, http.DefaultTransport will
 // be used.
 func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
+	InitRedis()
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
@@ -130,33 +134,52 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := p.Client.Get(req.String())
+	aws_key := fmt.Sprintf("cache/%v/%v", req.Options.String(), path.Base(req.URL.String()))
+	fmt.Println(aws_key)
+	if RedisGet(aws_key) != nil {
+
+		fmt.Fprintf(w, "https://d38p0gfgmbs5uo.cloudfront.net/cache/%v/%v", req.Options.String(), path.Base(req.URL.String()))
+		return
+	}
+
+	sess, err := session.NewSession()
 	if err != nil {
-		msg := fmt.Sprintf("error fetching remote image: %v", err)
-		glog.Error(msg)
-		http.Error(w, msg, http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	cached := resp.Header.Get(httpcache.XFromCache)
-	glog.Infof("request: %v (served from cache: %v)", *req, cached == "1")
-
-	copyHeader(w, resp, "Cache-Control")
-	copyHeader(w, resp, "Last-Modified")
-	copyHeader(w, resp, "Expires")
-	copyHeader(w, resp, "Etag")
-	copyHeader(w, resp, "Link")
-
-	if is304 := check304(r, resp); is304 {
-		w.WriteHeader(http.StatusNotModified)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Println(err)
 		return
 	}
 
-	copyHeader(w, resp, "Content-Length")
-	copyHeader(w, resp, "Content-Type")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	svc := s3.New(sess, aws.NewConfig().WithRegion("us-east-1"))
+
+	_, err = svc.HeadObject(&s3.HeadObjectInput{
+		Key:    &aws_key,
+		Bucket: aws.String("dindr-dish-photos"),
+	})
+	if err != nil {
+		resp, err := p.Client.Get(req.String())
+		if err != nil {
+			msg := fmt.Sprintf("error fetching remote image: %v", err)
+			glog.Error(msg)
+			http.Error(w, msg, http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+		content, _ := ioutil.ReadAll(resp.Body)
+		reader := bytes.NewReader(content)
+		_, err = svc.PutObject(&s3.PutObjectInput{
+			Body:   reader,
+			Bucket: aws.String("dindr-dish-photos"),
+			Key:    &aws_key,
+		})
+		if err != nil {
+			fmt.Println(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	RedisSet(aws_key, "t", time.Hour*24*7)
+	fmt.Fprintf(w, "https://d38p0gfgmbs5uo.cloudfront.net/cache/%v/%v", req.Options.String(), path.Base(req.URL.String()))
 }
 
 func copyHeader(w http.ResponseWriter, r *http.Response, header string) {
